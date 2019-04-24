@@ -43,7 +43,7 @@ test.t1	analyze	status	Engine-independent statistics collected
 test.t1	analyze	status	OK
 SHOW INDEX FROM t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment
-t1	1	a	1	a	A	5	NULL	NULL	YES	BTREE		
+t1	1	a	1	a	A	10	NULL	NULL	YES	BTREE		
 INSERT INTO t1 VALUES (11);
 DELETE FROM t1 WHERE a = 11;
 CHECK TABLE t1;
@@ -75,7 +75,7 @@ Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_par
 t1	1	a	1	a	A	2	NULL	NULL	YES	BTREE		
 t1	1	a	2	b	A	4	NULL	NULL	YES	BTREE		
 t1	1	a	3	c	A	4	NULL	NULL	YES	BTREE		
-t1	1	a	4	d	A	4	NULL	NULL	YES	BTREE		
+t1	1	a	4	d	A	0	NULL	NULL	YES	BTREE		
 DELETE FROM t1;
 ANALYZE TABLE t1;
 Table	Op	Msg_type	Msg_text
