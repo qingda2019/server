@@ -6557,6 +6557,10 @@ int handler::ha_write_row(uchar *buf)
 
   if (table->s->long_unique_table)
   {
+    if (table->in_use->lex->duplicates != DUP_ERROR ||
+        (   table->file->ha_table_flags() & HA_DUPLICATE_POS &&
+           table->in_use->lex->sql_command == SQLCOM_LOAD))
+      table->clone_handler_for_update();
     handler *h= table->update_handler ? table->update_handler : table->file;
     if ((error= check_duplicate_long_entries(table, h, buf)))
       DBUG_RETURN(error);
