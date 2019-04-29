@@ -169,6 +169,13 @@ struct fil_space_t {
 				/*!< list of all spaces */
 	/** other tablespaces needing key rotation */
 	UT_LIST_NODE_T(fil_space_t) rotation_list;
+
+	/** List of all encrypted spaces. Protected by fil_system->mutex. */
+	UT_LIST_NODE_T(fil_space_t) encrypted_spaces;
+
+	/** List of all unencrypted spaces. Protected by fil_system->mutex. */
+	UT_LIST_NODE_T(fil_space_t) unencrypted_spaces;
+
 	/** Checks that this tablespace needs key rotation.
 	@return true if in a rotation list */
 	bool is_in_rotation_list() const;
@@ -211,6 +218,38 @@ struct fil_space_t {
 	fil_node_t* add(const char* name, pfs_os_file_t handle,
 			ulint size, bool is_raw, bool atomic_write,
 			ulint max_pages = ULINT_MAX);
+
+	/** Add the space to encrypted or unencrypted list. */
+	void crypt_enlist();
+
+	/** Remove the space from encrypted or unencrypted list. */
+	void crypt_delist();
+
+	/** @return whether this is in fil_system->encrypted_spaces */
+	inline bool is_in_encrypted_spaces() const;
+
+	/** @return whether this is in fil_system->unencrypted_spaces */
+	inline bool is_in_unencrypted_spaces() const;
+
+private:
+	/** Remove this from fil_system->encrypted_spaces if listed.
+	@return whether this tablespace was listed and removed */
+	inline bool remove_if_in_encrypted_spaces();
+
+	/** Remove this from fil_system->unencrypted_spaces if listed.
+	@return whether this tablespace was listed and removed */
+	inline bool remove_if_in_unencrypted_spaces();
+
+	/** Add this to fil_system->encrypted_spaces if not listed.
+	@return whether we added this tablespace in encrypted tablespace
+	list. */
+	inline bool add_if_not_in_encrypted_spaces();
+
+	/** Add this to fil_system->unencrypted_spaces if not listed.
+	@return whether we added this tablespace in unencrypted
+	tablespace list. */
+	inline bool add_if_not_in_unencrypted_spaces();
+public:
 #ifdef UNIV_DEBUG
 	/** Assert that the mini-transaction is compatible with
 	updating an allocation bitmap page.
@@ -527,11 +566,51 @@ struct fil_system_t {
 	UT_LIST_BASE_NODE_T(fil_space_t) rotation_list;
 					/*!< list of all file spaces needing
 					key rotation.*/
+	/** List of all encrypted spaces */
+	UT_LIST_BASE_NODE_T(fil_space_t) encrypted_spaces;
+
+	/** List ofa ll unencrypted spaces */
+	UT_LIST_BASE_NODE_T(fil_space_t) unencrypted_spaces;
 
 	ibool		space_id_reuse_warned;
 					/* !< TRUE if fil_space_create()
 					has issued a warning about
 					potential space_id reuse */
+	/** Global encryption status. */
+	enum crypt_status_t {
+		/** All tablespaces are in encrypted state */
+		CRYPT_ENCRYPTED = 8,
+		/** All tablespaces are in unencrypted state */
+		CRYPT_DECRYPTED,
+		/** Some are unencrypted, some are encrypted */
+		CRYPT_MIXED
+	} crypt_status;
+
+	/** Number of encrypted created tables. */
+	ulint		n_encrypted_created_spaces;
+
+	/** Number of unencrypted created tables. */
+	ulint		n_unencrypted_created_spaces;
+
+	/** @return whether crypt_status has reached a stable state */
+	bool is_stable_crypt_status(bool encrypted)
+	{
+		mutex_enter(&mutex);
+		bool stable = crypt_status == (encrypted
+						? CRYPT_ENCRYPTED
+						: CRYPT_DECRYPTED);
+		mutex_exit(&mutex);
+		return stable;
+	}
+
+	/**
+	  Set the encryption status of all tablespaces after
+	  unencrypted spaces or encrypted spaces has been changed.
+
+	@param[in]	encrypted	whether the tablespace is encrypted
+	@param[in]	remove		whether the tablespace is
+					being removed. */
+	inline void crypt_update(bool encrypted, bool remove);
 };
 
 /** The tablespace memory cache. This variable is NULL before the module is

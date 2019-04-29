@@ -196,6 +196,195 @@ fil_validate_skip(void)
 }
 #endif /* UNIV_DEBUG */
 
+/** Set the encryption status of all tablespaces after unencrypted
+spaces or encrypted spaces has been changed. */
+inline void fil_system_t::crypt_update(
+	bool	encrypted,
+	bool	remove)
+{
+	ut_ad(this == fil_system);
+
+	if (srv_read_only_mode) {
+		return;
+	}
+
+	ut_ad(mutex_own(&mutex));
+	ut_ad(srv_operation == SRV_OPERATION_NORMAL);
+
+	crypt_status_t status = crypt_status;
+
+	switch (status) {
+	case CRYPT_ENCRYPTED:
+		if (!remove && !encrypted) {
+			status = CRYPT_MIXED;
+		}
+		break;
+	case CRYPT_DECRYPTED:
+		if (!remove && encrypted) {
+			status = CRYPT_MIXED;
+		}
+		break;
+	case CRYPT_MIXED:
+		ulint n_encrypted = UT_LIST_GET_LEN(encrypted_spaces);
+		ulint n_unencrypted = UT_LIST_GET_LEN(unencrypted_spaces);
+		fil_space_t* temp_space = fil_space_get_by_id(SRV_TMP_SPACE_ID);
+		/* Space list include redo log and temp spaces,
+		which are not part of key rotation. */
+		DBUG_ASSERT(UT_LIST_GET_LEN(space_list) >= 2);
+		ulint n_total = UT_LIST_GET_LEN(space_list) - (1 + !!temp_space);
+		DBUG_ASSERT(n_total + !temp_space
+			    >= (n_encrypted + n_unencrypted));
+
+		if ((n_total - n_unencrypted_created_spaces) == n_encrypted) {
+			status = CRYPT_ENCRYPTED;
+		} else if ((n_total - n_encrypted_created_spaces)
+			   == n_unencrypted) {
+			status = CRYPT_DECRYPTED;
+		}
+	}
+
+	crypt_status = status;
+}
+
+/** @return whether this is in fil_system->encrypted_spaces */
+inline bool fil_space_t::is_in_encrypted_spaces() const
+{
+	ut_ad(mutex_own(&fil_system->mutex));
+	return fil_system->encrypted_spaces.start == this
+		|| encrypted_spaces.next || encrypted_spaces.prev;
+}
+
+/** @return whether this is in fil_system->unencrypted_spaces */
+inline bool fil_space_t::is_in_unencrypted_spaces() const
+{
+	ut_ad(mutex_own(&fil_system->mutex));
+	return fil_system->unencrypted_spaces.start == this
+		|| unencrypted_spaces.next || unencrypted_spaces.prev;
+}
+
+/** Remove this from fil_system->encrypted_spaces if listed
+@return whether this tablespace was listed and removed */
+inline bool fil_space_t::remove_if_in_encrypted_spaces()
+{
+	bool remove = is_in_encrypted_spaces();
+	if (remove) {
+		UT_LIST_REMOVE(fil_system->encrypted_spaces, this);
+		if (crypt_data->encryption == FIL_ENCRYPTION_ON) {
+			fil_system->n_encrypted_created_spaces--;
+		}
+	}
+
+	return remove;
+}
+
+/** Remove this from fil_system->unencrypted_spaces if listed
+@return whether this tablespace was listed and removed */
+inline bool fil_space_t::remove_if_in_unencrypted_spaces()
+{
+	bool remove = is_in_unencrypted_spaces();
+	if (remove) {
+		UT_LIST_REMOVE(fil_system->unencrypted_spaces, this);
+		if (crypt_data != NULL
+		    && crypt_data->encryption == FIL_ENCRYPTION_OFF) {
+			fil_system->n_unencrypted_created_spaces--;
+		}
+	}
+
+	return remove;
+}
+
+/** Add this to fil_system->encrypted_spaces if not listed.
+@return whether we added this tablespace in encrypted tablespace list. */
+inline bool fil_space_t::add_if_not_in_encrypted_spaces()
+{
+	bool add = !is_in_encrypted_spaces();
+	if (add) {
+		UT_LIST_ADD_LAST(fil_system->encrypted_spaces, this);
+		if (crypt_data->encryption == FIL_ENCRYPTION_ON) {
+			fil_system->n_encrypted_created_spaces++;
+		}
+	}
+
+	return add;
+}
+
+/** Add this to fil_system->unencrypted_spaces if not listed.
+@return whether we added this tablespace in unencrypted tablespace list. */
+inline bool fil_space_t::add_if_not_in_unencrypted_spaces()
+{
+	bool add = !is_in_unencrypted_spaces();
+	if (add) {
+		UT_LIST_ADD_LAST(fil_system->unencrypted_spaces, this);
+		if (crypt_data != NULL
+		    && crypt_data->encryption == FIL_ENCRYPTION_OFF) {
+			fil_system->n_unencrypted_created_spaces++;
+		}
+	}
+
+	return add;
+}
+
+/** Add the space to encrypted or unencrypted list. */
+void fil_space_t::crypt_enlist()
+{
+	if (srv_operation != SRV_OPERATION_NORMAL) {
+		return;
+	}
+
+	ut_ad(mutex_own(&fil_system->mutex));
+
+	if (!crypt_data || !crypt_data->min_key_version) {
+		if (add_if_not_in_unencrypted_spaces()) {
+			remove_if_in_encrypted_spaces();
+			fil_system->crypt_update(false, false);
+		}
+	} else {
+		if (add_if_not_in_encrypted_spaces()) {
+			remove_if_in_unencrypted_spaces();
+			fil_system->crypt_update(true, false);
+		}
+	}
+}
+
+/** Remove the space from encrypted or unencrypted list. */
+void fil_space_t::crypt_delist()
+{
+	if (srv_operation != SRV_OPERATION_NORMAL) {
+		return;
+	}
+
+	if (remove_if_in_encrypted_spaces()) {
+		ut_ad(!is_in_encrypted_spaces());
+
+		if (srv_shutdown_state == SRV_SHUTDOWN_LAST_PHASE) {
+			return;
+		}
+
+		ut_ad(crypt_data->encryption == FIL_ENCRYPTION_ON
+		      || (fil_system->crypt_status
+			  != fil_system_t::CRYPT_DECRYPTED));
+
+		return fil_system->crypt_update(true, true);
+	}
+
+	if (remove_if_in_unencrypted_spaces()) {
+		ut_ad(!is_in_unencrypted_spaces());
+
+		if (srv_shutdown_state == SRV_SHUTDOWN_LAST_PHASE) {
+			return;
+		}
+
+		ut_ad((crypt_data != NULL
+		       && crypt_data->encryption == FIL_ENCRYPTION_OFF)
+		      || (fil_system->crypt_status
+			  != fil_system_t::CRYPT_ENCRYPTED));
+
+		return fil_system->crypt_update(false, true);
+	}
+
+	ut_ad(size == 0);
+}
+
 /********************************************************************//**
 Determines if a file node belongs to the least-recently-used list.
 @return true if the file belongs to fil_system->LRU mutex. */
@@ -555,6 +744,11 @@ bool fil_node_t::read_page0(bool first)
 	if (!space->crypt_data) {
 		space->crypt_data = fil_space_read_crypt_data(page_size, page);
 	}
+
+	if (first) {
+		space->crypt_enlist();
+	}
+
 	ut_free(buf2);
 
 	if (!fsp_flags_is_valid(flags, space->id)) {
@@ -1212,6 +1406,11 @@ fil_space_detach(
 {
 	ut_ad(mutex_own(&fil_system->mutex));
 
+	if (space->purpose == FIL_TYPE_TABLESPACE
+	    || space->purpose == FIL_TYPE_IMPORT) {
+		space->crypt_delist();
+	}
+
 	HASH_DELETE(fil_space_t, hash, fil_system->spaces, space->id, space);
 
 	fil_space_t*	fnamespace = fil_space_get_by_name(space->name);
@@ -1446,6 +1645,10 @@ fil_space_create(
 	if (id < SRV_LOG_SPACE_FIRST_ID && id > fil_system->max_assigned_id) {
 
 		fil_system->max_assigned_id = id;
+	}
+
+	if (crypt_data) {
+		space->crypt_enlist();
 	}
 
 	/* Inform key rotation that there could be something
@@ -1804,8 +2007,14 @@ fil_init(
 	UT_LIST_INIT(fil_system->unflushed_spaces,
 		     &fil_space_t::unflushed_spaces);
 	UT_LIST_INIT(fil_system->named_spaces, &fil_space_t::named_spaces);
-
+	UT_LIST_INIT(fil_system->encrypted_spaces,
+		     &fil_space_t::encrypted_spaces);
+	UT_LIST_INIT(fil_system->unencrypted_spaces,
+		     &fil_space_t::unencrypted_spaces);
+	fil_system->crypt_status = fil_system_t::CRYPT_DECRYPTED;
 	fil_system->max_n_open = max_n_open;
+	fil_system->n_encrypted_created_spaces = 0;
+	fil_system->n_unencrypted_created_spaces = 0;
 
 	fil_space_crypt_init();
 }
@@ -3747,6 +3956,12 @@ fil_ibd_create(
 
 		file->block_size = block_size;
 		space->punch_hole = punch_hole;
+
+		if (space->purpose == FIL_TYPE_TABLESPACE && !crypt_data) {
+			mutex_enter(&fil_system->mutex);
+			space->crypt_enlist();
+			mutex_exit(&fil_system->mutex);
+		}
 
 		err = DB_SUCCESS;
 	}
