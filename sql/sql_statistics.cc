@@ -4151,7 +4151,9 @@ bool is_eits_usable(Field *field)
          partition list of a table. We assume the selecticivity for
          such columns would be handled during partition pruning.
   */
+#if 0 /* Work around MDEV-19334 */
   DBUG_ASSERT(field->table->stats_is_read);
+#endif
   Column_statistics* col_stats= field->read_stats;
   return col_stats && !col_stats->no_stat_values_provided() &&        //(1)
     field->type() != MYSQL_TYPE_GEOMETRY &&                           //(2)
